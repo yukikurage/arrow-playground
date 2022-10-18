@@ -17,7 +17,7 @@ to generate this file without the comments in this block.
   , "effect"
   , "either"
   , "maybe"
-  , "prelude"
+  , "js-timers", "prelude"
   , "profunctor"
   , "tuples"
   ]

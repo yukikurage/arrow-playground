@@ -6,12 +6,16 @@ import Data.Either (Either(..), either)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Profunctor (class Profunctor)
 import Data.Profunctor.Choice (class Choice)
-import Data.Profunctor.Cochoice (class Cochoice, unleft)
-import Data.Profunctor.Strong (class Strong)
+import Data.Profunctor.Cochoice (class Cochoice)
 import Data.Tuple (Tuple(..), fst, snd)
 import Effect (Effect)
+import Effect.Timer (setTimeout)
 
 foreign import data EventEmitter :: Type -> Type
+
+foreign import newEventEmitter :: forall a. Effect (EventEmitter a)
+foreign import emit :: forall a. EventEmitter a -> a -> Effect Unit
+foreign import listen :: forall a. EventEmitter a -> (a -> Effect Unit) -> Effect Unit
 
 newtype EventSource a = EventSource ((a -> Effect Unit) -> Effect Unit)
 
@@ -28,6 +32,9 @@ instance Bind EventSource where
   bind (EventSource f) k = EventSource \cb -> f \a -> case k a of EventSource g -> g cb
 
 instance Monad EventSource
+
+listenEventEmitter :: forall a. EventEmitter a -> EventSource a
+listenEventEmitter ee = EventSource \cb -> listen ee cb
 
 subscribe :: forall a. EventSource a -> (a -> Effect Unit) -> Effect Unit
 subscribe (EventSource f) = f
@@ -52,10 +59,25 @@ merge eventSourceA eventSourceB = EventSource \handler -> do
   subscribe eventSourceA (handler <<< Left)
   subscribe eventSourceB (handler <<< Right)
 
-fixEs :: forall a. (EventSource a -> EventSource a) -> EventSource a
-fixEs f = EventSource \handler -> do
-  let eventSource = f (EventSource \handler' -> subscribe eventSource handler')
+concat :: forall a. EventSource (Either a a) -> EventSource a
+concat eventSource = EventSource \handler -> subscribe eventSource (either handler handler)
+
+dup :: forall a. EventSource a -> EventSource (Either a a)
+dup eventSource = merge eventSource eventSource
+
+delay :: forall a. Int -> EventSource a -> EventSource a
+delay ms eventSource = EventSource \handler -> do
+  ee <- newEventEmitter
+  subscribe eventSource \a -> do
+    void $ setTimeout ms (emit ee a)
+  listen ee handler
+
+rec :: forall a. (EventSource a -> EventSource a) -> EventSource a
+rec f = EventSource \handler -> do
+  ee <- newEventEmitter
+  let eventSource = f (listenEventEmitter ee)
   subscribe eventSource handler
+  subscribe eventSource (emit ee)
 
 newtype EventMachine a b = EventMachine (EventSource a -> EventSource b)
 
@@ -77,8 +99,14 @@ instance Choice EventMachine where
   right (EventMachine f) = EventMachine \eventSource ->
     merge (fst $ separate eventSource) $ f $ snd $ separate eventSource
 
--- instance Cochoice EventMachine where
---   unleft (EventMachine f) = EventMachine \eventSource ->
---     catMaybes $ f $ map (either Just (const Nothing)) eventSource
---   unright (EventMachine f) = EventMachine \eventSource ->
---     catMaybes $ f $ map (either (const Nothing) Just) eventSource
+instance Cochoice EventMachine where
+  unleft (EventMachine f) = EventMachine \eventSourceA ->
+    let
+      eventSourceBC = rec \ev -> f $ merge (eventSourceA) $ snd $ separate ev
+    in
+      fst $ separate $ eventSourceBC
+  unright (EventMachine f) = EventMachine \eventSourceB ->
+    let
+      eventSourceAC = rec \ev -> f $ merge (fst $ separate ev) $ eventSourceB
+    in
+      snd $ separate $ eventSourceAC
